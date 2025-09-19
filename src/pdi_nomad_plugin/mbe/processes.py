@@ -1601,62 +1601,75 @@ class ExperimentMbePDI(Experiment, EntryData):
                             grown=True,
                         )
 
-        # create samples archives
-        if (
-            self.growth_run_logfiles is not None
-            and self.substrate_holder is not None
-            and not self.samples
-        ):
+        # Create or update samples archives
+        # This section handles two cases:
+        # 1. Create thin film stacks when only a substrate holder is present
+        # 2. Update existing thin film stacks when a growth process is linked
+        
+        # First, get the growth process ID if available
+        growth_id = None
+        if self.growth_run_logfiles is not None and self.growth_run_logfiles.reference:
+            growth_id = self.growth_run_logfiles.reference.lab_id
+        
+        # Case 1: Create new samples if none exist yet and substrate holder is available
+        if self.substrate_holder is not None and not self.samples:
             if self.substrate_holder.reference:
-                growth_id = self.growth_run_logfiles.reference.lab_id
                 self.samples = []
                 for sample_holder_position in self.substrate_holder.reference.positions:
                     if sample_holder_position.substrate:
                         filetype = 'yaml'
-                        stack_id = f'{growth_id}_{sample_holder_position.name}'
-                        layer_id = f'{stack_id}_lyr_1'  # TODO adapt this to the number of layers
-                        layer_object = ThinFilmMbe(
-                            name=f'{layer_id}',
-                            lab_id=layer_id,
-                        )
-                        layer_archive = EntryArchive(
-                            m_context=archive.m_context,
-                            data=layer_object,
-                        )
-                        layer_filename = f'{layer_id}.archive.{filetype}'
-                        layer_reference = create_archive(
-                            layer_archive.m_to_dict(),
-                            archive.m_context,
-                            layer_filename,
-                            filetype,
-                            logger,
-                        )
+                        # Use holder ID if growth_id is not available
+                        holder_id = self.substrate_holder.reference.lab_id if hasattr(self.substrate_holder.reference, 'lab_id') else "holder"
+                        position_name = sample_holder_position.name
+                        stack_id = f'{growth_id}_{position_name}' if growth_id else f'{holder_id}_{position_name}'
+                        
+                        # Only create layer if growth process is available
+                        layer_reference = None
+                        if growth_id:
+                            layer_id = f'{stack_id}_lyr_1'  # TODO adapt this to the number of layers
+                            layer_object = ThinFilmMbe(
+                                name=f'{layer_id}',
+                                lab_id=layer_id,
+                            )
+                            layer_archive = EntryArchive(
+                                m_context=archive.m_context,
+                                data=layer_object,
+                            )
+                            layer_filename = f'{layer_id}.archive.{filetype}'
+                            layer_reference = create_archive(
+                                layer_archive.m_to_dict(),
+                                archive.m_context,
+                                layer_filename,
+                                filetype,
+                                logger,
+                            )
+                            
+                        # Create sample object
                         sample_object = ThinFilmStackMbePDI(
                             name=stack_id,
                             lab_id=stack_id,
-                            datetime=self.datetime,
+                            datetime=self.datetime if hasattr(self, 'datetime') else None,
                             substrate=SubstrateReference(
                                 name=sample_holder_position.substrate.reference.lab_id,
                                 reference=sample_holder_position.substrate.reference,
                             ),
                         )
-                        # TODO check why m_add_sub_section does not work
-                        # sample_object.m_add_sub_section(
-                        #             ThinFilmStackMbePDI.layers, ThinFilmReference(
-                        #         reference=layer_reference,
-                        #         ))
-                        sample_object.layers.append(
-                            ThinFilmReference(
-                                name=layer_id,
-                                reference=layer_reference,
+                        
+                        # Only add layer if it was created (growth process available)
+                        if layer_reference:
+                            sample_object.layers.append(
+                                ThinFilmReference(
+                                    name=layer_id,
+                                    reference=layer_reference,
+                                )
                             )
-                        )
+                        
                         stack_filename = f'{stack_id}.archive.{filetype}'
-
                         sample_archive = EntryArchive(
                             m_context=archive.m_context,
                             data=sample_object,
                         )
+                        
                         self.samples.append(
                             CompositeSystemReference(
                                 reference=create_archive(
@@ -1668,6 +1681,82 @@ class ExperimentMbePDI(Experiment, EntryData):
                                 ),
                             )
                         )
+        
+        # Case 2: Update existing samples if a growth process has been added and samples already exist
+        elif self.substrate_holder is not None and self.samples and growth_id:
+            # Create a mapping of position names to existing samples
+            MIN_PARTS_IN_LAB_ID = 2  # Minimum number of parts in lab_id (holder_id_position_name)
+            position_to_sample = {}
+            for sample_ref in self.samples:
+                if hasattr(sample_ref, 'reference') and sample_ref.reference:
+                    sample = sample_ref.reference
+                    if hasattr(sample, 'lab_id') and sample.lab_id:
+                        # Extract position name from lab_id (format: holder_id_position_name)
+                        parts = sample.lab_id.split('_')
+                        if len(parts) >= MIN_PARTS_IN_LAB_ID:
+                            position_name = parts[-1]  # Last part should be position name
+                            position_to_sample[position_name] = sample
+            
+            # Now go through substrate holder positions and update corresponding samples
+            if self.substrate_holder.reference:
+                for sample_holder_position in self.substrate_holder.reference.positions:
+                    if sample_holder_position.substrate:
+                        position_name = sample_holder_position.name
+                        
+                        # If we found a matching sample for this position
+                        if position_name in position_to_sample:
+                            sample = position_to_sample[position_name]
+                            
+                            # If this sample doesn't have layers yet, add them
+                            if not hasattr(sample, 'layers') or not sample.layers:
+                                filetype = 'yaml'
+                                stack_id = f'{growth_id}_{position_name}'
+                                layer_id = f'{stack_id}_lyr_1'  # TODO adapt this to the number of layers
+                                
+                                # Create layer object
+                                layer_object = ThinFilmMbe(
+                                    name=f'{layer_id}',
+                                    lab_id=layer_id,
+                                )
+                                layer_archive = EntryArchive(
+                                    m_context=archive.m_context,
+                                    data=layer_object,
+                                )
+                                layer_filename = f'{layer_id}.archive.{filetype}'
+                                layer_reference = create_archive(
+                                    layer_archive.m_to_dict(),
+                                    archive.m_context,
+                                    layer_filename,
+                                    filetype,
+                                    logger,
+                                )
+                                
+                                # Update the sample with the new layer and update its ID to include growth ID
+                                sample.name = stack_id
+                                sample.lab_id = stack_id
+                                
+                                # Initialize layers list if it doesn't exist
+                                if not hasattr(sample, 'layers'):
+                                    sample.layers = []
+                                
+                                # Add the layer
+                                sample.layers.append(
+                                    ThinFilmReference(
+                                        name=layer_id,
+                                        reference=layer_reference,
+                                    )
+                                )
+                                
+                                # Update the sample archive file
+                                with archive.m_context.raw_file(sample.m_parent.metadata.mainfile, 'w') as newfile:
+                                    import yaml
+                                    yaml.dump(sample.m_parent.m_to_dict(), newfile)
+                                
+                                logger.info(f"Updated ThinFilmStackMbePDI '{sample.lab_id}' with layer from growth process '{growth_id}'")
+                            
+                            # If the sample already has layers, don't modify it
+                            else:
+                                logger.info(f"ThinFilmStackMbePDI '{sample.lab_id}' already has layers, not updating")
 
         # recalculate the growth start time and rewrite the HDF5 file
         if self.recalculate_growth_start_time:
